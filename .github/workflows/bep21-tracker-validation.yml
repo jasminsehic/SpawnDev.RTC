@@ -1,0 +1,91 @@
+name: BEP 21 RTC tracker validation
+
+on:
+  push:
+    branches: [feature/bep21-*]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  server-bep21:
+    name: Tracker BEP 21 WebSocket integration tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      # The RTC repo references an unreleased local MultiMedia package.
+      # Build that exact upstream version locally instead of downgrading RTC's dependency.
+      - name: Fetch pinned local MultiMedia source outside the test workspace
+        run: |
+          git init -q "$RUNNER_TEMP/SpawnDev.MultiMedia"
+          git -C "$RUNNER_TEMP/SpawnDev.MultiMedia" remote add origin https://github.com/LostBeard/SpawnDev.MultiMedia.git
+          git -C "$RUNNER_TEMP/SpawnDev.MultiMedia" fetch -q --depth=1 origin d4f90c822bb1e560be42b5c5cd9601582326b051
+          git -C "$RUNNER_TEMP/SpawnDev.MultiMedia" checkout -q FETCH_HEAD
+      # The published SIPSorcery package lacks RTCConfiguration SCTP settings
+      # required by the current RTC source. The project conditionally uses its
+      # sibling project when checked out under Src/sipsorcery.
+      - uses: actions/checkout@v4
+        with:
+          repository: LostBeard/sipsorcery
+          ref: fae3db43612a3dd34177a71faea2ee4dbc80cef0
+          path: Src/sipsorcery
+      - name: Build missing local MultiMedia package
+        run: dotnet pack "$RUNNER_TEMP/SpawnDev.MultiMedia/SpawnDev.MultiMedia/SpawnDev.MultiMedia.csproj" -c Release -p:GeneratePackageOnBuild=false --output "$GITHUB_WORKSPACE/local-packages"
+      - name: Register local NuGet feed
+        run: dotnet nuget add source "$GITHUB_WORKSPACE/local-packages" --name SpawnDev-Local-CI
+      - name: Restore existing test harness
+        run: dotnet restore PlaywrightMultiTest/PlaywrightMultiTest.csproj
+      - name: Run BEP 21 server integration tests
+        run: dotnet test PlaywrightMultiTest/PlaywrightMultiTest.csproj -c Release --no-restore --filter "FullyQualifiedName~TrackerBep21Tests" --logger "console;verbosity=normal"
+
+  full-suite:
+    name: Existing RTC desktop and browser test suite
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Install WASM workload
+        run: dotnet workload install wasm-tools
+      # The RTC repo references an unreleased local MultiMedia package.
+      # Build that exact upstream version locally instead of downgrading RTC's dependency.
+      - name: Fetch pinned local MultiMedia source outside the test workspace
+        run: |
+          git init -q "$RUNNER_TEMP/SpawnDev.MultiMedia"
+          git -C "$RUNNER_TEMP/SpawnDev.MultiMedia" remote add origin https://github.com/LostBeard/SpawnDev.MultiMedia.git
+          git -C "$RUNNER_TEMP/SpawnDev.MultiMedia" fetch -q --depth=1 origin d4f90c822bb1e560be42b5c5cd9601582326b051
+          git -C "$RUNNER_TEMP/SpawnDev.MultiMedia" checkout -q FETCH_HEAD
+      # The published SIPSorcery package lacks RTCConfiguration SCTP settings
+      # required by the current RTC source. The project conditionally uses its
+      # sibling project when checked out under Src/sipsorcery.
+      - uses: actions/checkout@v4
+        with:
+          repository: LostBeard/sipsorcery
+          ref: fae3db43612a3dd34177a71faea2ee4dbc80cef0
+          path: Src/sipsorcery
+      - name: Build missing local MultiMedia package
+        run: dotnet pack "$RUNNER_TEMP/SpawnDev.MultiMedia/SpawnDev.MultiMedia/SpawnDev.MultiMedia.csproj" -c Release -p:GeneratePackageOnBuild=false --output "$GITHUB_WORKSPACE/local-packages"
+      - name: Register local NuGet feed
+        run: dotnet nuget add source "$GITHUB_WORKSPACE/local-packages" --name SpawnDev-Local-CI
+      - name: Restore full test harness
+        run: dotnet restore PlaywrightMultiTest/PlaywrightMultiTest.csproj
+      - name: Build full test harness
+        run: dotnet build PlaywrightMultiTest/PlaywrightMultiTest.csproj --no-restore -c Release
+      - name: Install Chrome and Playwright dependencies
+        run: pwsh PlaywrightMultiTest/bin/Release/net10.0/playwright.ps1 install --with-deps chrome
+      - name: Trust the local HTTPS tracker test certificate
+        run: |
+          openssl pkcs12 -in PlaywrightMultiTest/assets/testcert.pfx -passin pass:unittests -clcerts -nokeys -out "$RUNNER_TEMP/rtc-tracker-ca.pem"
+          sudo cp "$RUNNER_TEMP/rtc-tracker-ca.pem" /usr/local/share/ca-certificates/rtc-tracker.crt
+          sudo update-ca-certificates
+      - name: Run existing full suite
+        run: xvfb-run -a dotnet test PlaywrightMultiTest/PlaywrightMultiTest.csproj --no-build -c Release --logger "console;verbosity=normal"
